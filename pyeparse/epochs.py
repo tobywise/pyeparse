@@ -5,7 +5,6 @@
 
 from copy import deepcopy
 import numpy as np
-from scipy.optimize import fmin_slsqp
 import warnings
 
 from ._event import Discrete
@@ -13,6 +12,7 @@ from .viz import plot_epochs
 from .utils import pupil_kernel
 from ._fixes import string_types, nanmean, nanstd
 from .parallel import parallel_func
+from mne.filter import resample as mne_resample
 
 
 class Epochs(object):
@@ -575,6 +575,17 @@ class Epochs(object):
                           % (np.sum(fails != 0), len(fails), reasons))
         return fit, times
 
+    def resample(self, sfreq, npad='auto', window='boxcar', n_jobs=1,
+                 copy=False):
+        epochs = self.copy() if copy else self
+        o_sfreq = epochs.info['sfreq']
+        epochs._data = mne_resample(epochs._data, sfreq, o_sfreq, npad,
+                                window=window, n_jobs=n_jobs)
+        # adjust indirectly affected variables
+        epochs.info['sfreq'] = float(sfreq)
+        epochs._n_times = epochs._data.shape[2]
+        return epochs
+
 
 def _do_deconv(pupil_data, conv_mat, bounds, max_iter, acc):
     """Helper to parallelize deconvolution"""
@@ -634,3 +645,4 @@ def _area_between_times(t1, t2):
     x2 = list(range(len(t2)))
     xs = np.concatenate((x1, x2))
     return np.sum(np.abs(np.interp(xs, x1, t1) - np.interp(xs, x2, t2)))
+

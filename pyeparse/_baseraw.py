@@ -10,6 +10,8 @@ from copy import deepcopy
 from ._event import find_events
 from ._fixes import string_types
 from .viz import plot_calibration, plot_heatmap_raw, plot_raw
+from .utils import _filt_update_info
+from mne.filter import filter_data
 
 
 class _BaseRaw(object):
@@ -215,7 +217,7 @@ class _BaseRaw(object):
         """
         return find_events(raw=self, pattern=pattern, event_id=event_id)
 
-    def remove_blink_artifacts(self, interp='linear', borders=(0.025, 0.1),
+    def remove_blink_artifacts(self, measures=('ps'), interp='linear', borders=(0.025, 0.1),
                                use_only_blink=False):
         """Remove blink artifacts from gaze data
 
@@ -224,6 +226,8 @@ class _BaseRaw(object):
 
         Parameters
         ----------
+        measures: list | tuple
+            Measures to interpolate
         interp : str | None
             If string, can be 'linear' or 'zoh' (zeroth-order hold).
             If None, no interpolation is done, and extra ``nan`` values
@@ -270,16 +274,154 @@ class _BaseRaw(object):
         for stime, etime in zip(starts, ends):
             sidx, eidx = self.time_as_index([stime, etime])
             ps_vals = self['ps', sidx:eidx][0]
-            if interp is None:
-                fix = np.nan
-            elif interp == 'zoh':
-                fix = ps_vals[0]
-            elif interp == 'linear':
-                len_ = eidx - sidx
-                fix = np.linspace(ps_vals[0], ps_vals[-1], len_)
-            vals = self[:, sidx:eidx][0]
-            vals[:] = np.nan
-            ps_vals[:] = fix
+            if len(ps_vals):
+                if interp is None:
+                    fix = np.nan
+                elif interp == 'zoh':
+                    fix = ps_vals[0]
+                elif interp == 'linear':
+                    len_ = eidx - sidx
+                    fix = np.linspace(ps_vals[0], ps_vals[-1], len_)
+                vals = self['ps', sidx:eidx][0]
+                vals[:] = np.nan
+                ps_vals[:] = fix
+
+    def filter(self, l_freq, h_freq, picks=None, filter_length='auto',
+               l_trans_bandwidth='auto', h_trans_bandwidth='auto', n_jobs=1,
+               method='fir', iir_params=None, phase='zero',
+               fir_window='hamming', fir_design='firwin',
+               pad='reflect_limited'):
+        """Filter a subset of channels.
+        Applies a zero-phase low-pass, high-pass, band-pass, or band-stop
+        filter to the channels selected by ``picks``. By default the data
+        of the Raw object is modified inplace.
+        The Raw object has to have the data loaded e.g. with ``preload=True``
+        or ``self.load_data()``.
+        ``l_freq`` and ``h_freq`` are the frequencies below which and above
+        which, respectively, to filter out of the data. Thus the uses are:
+            * ``l_freq < h_freq``: band-pass filter
+            * ``l_freq > h_freq``: band-stop filter
+            * ``l_freq is not None and h_freq is None``: high-pass filter
+            * ``l_freq is None and h_freq is not None``: low-pass filter
+        ``self.info['lowpass']`` and ``self.info['highpass']`` are only
+        updated with picks=None.
+        .. note:: If n_jobs > 1, more memory is required as
+                  ``len(picks) * n_times`` additional time points need to
+                  be temporaily stored in memory.
+        Parameters
+        ----------
+        l_freq : float | None
+            Low cut-off frequency in Hz. If None the data are only low-passed.
+        h_freq : float | None
+            High cut-off frequency in Hz. If None the data are only
+            high-passed.
+        picks : array-like of int | None
+            Indices of channels to filter. If None only the data (MEG/EEG)
+            channels will be filtered.
+        filter_length : str | int
+            Length of the FIR filter to use (if applicable):
+            * 'auto' (default): the filter length is chosen based
+              on the size of the transition regions (6.6 times the reciprocal
+              of the shortest transition band for fir_window='hamming'
+              and fir_design="firwin2", and half that for "firwin").
+            * str: a human-readable time in
+              units of "s" or "ms" (e.g., "10s" or "5500ms") will be
+              converted to that number of samples if ``phase="zero"``, or
+              the shortest power-of-two length at least that duration for
+              ``phase="zero-double"``.
+            * int: specified length in samples. For fir_design="firwin",
+              this should not be used.
+        l_trans_bandwidth : float | str
+            Width of the transition band at the low cut-off frequency in Hz
+            (high pass or cutoff 1 in bandpass). Can be "auto"
+            (default) to use a multiple of ``l_freq``::
+                min(max(l_freq * 0.25, 2), l_freq)
+            Only used for ``method='fir'``.
+        h_trans_bandwidth : float | str
+            Width of the transition band at the high cut-off frequency in Hz
+            (low pass or cutoff 2 in bandpass). Can be "auto"
+            (default) to use a multiple of ``h_freq``::
+                min(max(h_freq * 0.25, 2.), info['sfreq'] / 2. - h_freq)
+            Only used for ``method='fir'``.
+        n_jobs : int | str
+            Number of jobs to run in parallel. Can be 'cuda' if scikits.cuda
+            is installed properly, CUDA is initialized, and method='fir'.
+        method : str
+            'fir' will use overlap-add FIR filtering, 'iir' will use IIR
+            forward-backward filtering (via filtfilt).
+        iir_params : dict | None
+            Dictionary of parameters to use for IIR filtering.
+            See mne.filter.construct_iir_filter for details. If iir_params
+            is None and method="iir", 4th order Butterworth will be used.
+        phase : str
+            Phase of the filter, only used if ``method='fir'``.
+            By default, a symmetric linear-phase FIR filter is constructed.
+            If ``phase='zero'`` (default), the delay of this filter
+            is compensated for. If ``phase=='zero-double'``, then this filter
+            is applied twice, once forward, and once backward. If 'minimum',
+            then a minimum-phase, causal filter will be used.
+            .. versionadded:: 0.13
+        fir_window : str
+            The window to use in FIR design, can be "hamming" (default),
+            "hann" (default in 0.13), or "blackman".
+            .. versionadded:: 0.13
+        fir_design : str
+            Can be "firwin" (default) to use :func:`scipy.signal.firwin`,
+            or "firwin2" to use :func:`scipy.signal.firwin2`. "firwin" uses
+            a time-domain design technique that generally gives improved
+            attenuation using fewer samples than "firwin2".
+            .. versionadded:: 0.15
+        skip_by_annotation : str | list of str
+            If a string (or list of str), any annotation segment that begins
+            with the given string will not be included in filtering, and
+            segments on either side of the given excluded annotated segment
+            will be filtered separately (i.e., as independent signals).
+            The default (``('edge', 'bad_acq_skip')`` will separately filter
+            any segments that were concatenated by :func:`mne.concatenate_raws`
+            or :meth:`mne.io.Raw.append`, or separated during acquisition.
+            To disable, provide an empty list.
+            .. versionadded:: 0.16.
+        pad : str
+            The type of padding to use. Supports all :func:`numpy.pad` ``mode``
+            options. Can also be "reflect_limited" (default), which pads with a
+            reflected version of each vector mirrored on the first and last
+            values of the vector, followed by zeros.
+            Only used for ``method='fir'``.
+            .. versionadded:: 0.15
+        verbose : bool, str, int, or None
+            If not None, override default verbose level (see
+            :func:`mne.verbose` and :ref:`Logging documentation <tut_logging>`
+            for more). Defaults to self.verbose.
+        Returns
+        -------
+        raw : instance of Raw
+            The raw instance with filtered data.
+        See Also
+        --------
+        mne.Epochs.savgol_filter
+        mne.io.Raw.notch_filter
+        mne.io.Raw.resample
+        mne.filter.filter_data
+        mne.filter.construct_iir_filter
+        Notes
+        -----
+        For more information, see the tutorials
+        :ref:`sphx_glr_auto_tutorials_plot_background_filtering.py`
+        and
+        :ref:`sphx_glr_auto_tutorials_plot_artifacts_correction_filtering.py`.
+        """
+
+        filter_data(
+            self._samples, self.info['sfreq'], l_freq, h_freq,
+            picks, filter_length, l_trans_bandwidth, h_trans_bandwidth,
+            n_jobs, method, iir_params, copy=False, phase=phase,
+            fir_window=fir_window, fir_design=fir_design, pad=pad)
+        # update info if filter is applied to all data channels,
+        # and it's not a band-stop filter
+        _filt_update_info(self.info, True, l_freq, h_freq)
+
+        return self
+
 
 
 def read_raw(fname):
@@ -298,4 +440,7 @@ def read_raw(fname):
     elif ext == '.hd5':
         from .hd5._raw import RawHD5
         raw = RawHD5(fname)
+    elif ext == '.hdf5':
+        from .hd5._raw import RawIoHubHD5
+        raw = RawIoHubHD5(fname)
     return raw
